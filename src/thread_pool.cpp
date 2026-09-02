@@ -206,6 +206,26 @@ gb_internal void thread_pool_wait(ThreadPool *pool) {
 			return;
 		}
 
+		// On Linux/WSL the futex wake path is heavier than on native (WSL
+		// futex wakes route through virtio and routinely cost 50-200us).
+		// Most task completions are signalled well within that window, so
+		// a short spin here avoids the futex syscall entirely for the
+		// common "all workers finished within microseconds" case. We
+		// observe tasks_left (the same value we'd hand to futex_wait) so
+		// that if it changes we return immediately without sleeping.
+		#if !defined(GB_SYSTEM_WINDOWS)
+		for (int spin_i = 0; spin_i < 256; spin_i++) {
+			if (pool->tasks_left.load(std::memory_order_acquire) == 0) {
+				return;
+			}
+			sched_yield();
+		}
+		rem_tasks = pool->tasks_left.load(std::memory_order_acquire);
+		if (rem_tasks == 0) {
+			return;
+		}
+		#endif
+
 		futex_wait(&pool->tasks_left, rem_tasks);
 	}
 }
@@ -273,6 +293,20 @@ gb_internal THREAD_PROC(thread_pool_thread_proc) {
 			futex_broadcast(&pool->tasks_available);
 			break;
 		}
+
+		// Same WSL-futex rationale as in thread_pool_wait: spin briefly
+		// before sleeping so workers wake up faster when a producer is
+		// about to publish a task (the common case during parsing and
+		// LLVM work).
+		#if !defined(GB_SYSTEM_WINDOWS)
+		for (int spin_i = 0; spin_i < 256; spin_i++) {
+			i32 s = pool->tasks_available.load(std::memory_order_acquire);
+			if (s == Nobody_Waiting) {
+				goto main_loop_continue;
+			}
+			sched_yield();
+		}
+		#endif
 		futex_wait(&pool->tasks_available, Someone_Waiting);
 
 		main_loop_continue:;
