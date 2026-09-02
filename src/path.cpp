@@ -432,6 +432,13 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) 
 
 	array_init(fi, a, 0, 100);
 
+	// NOTE: Resolve the directory's canonical path ONCE instead of calling
+	// realpath() (which calls readlink() on every ancestor path component)
+	// for every file in the directory. This dramatically reduces syscall
+	// overhead, especially on WSL where each syscall is much more expensive.
+	String canonical_dir = path_to_full_path(a, path);
+	defer (gb_free(a, canonical_dir.text));
+
 	for (;;) {
 		struct dirent *entry = readdir(dir);
 		if (entry == nullptr) {
@@ -443,19 +450,24 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) 
 			continue;
 		}
 
-		String filepath = {};
-		filepath.len = path.len+1+name.len;
-		filepath.text = gb_alloc_array(a, u8, filepath.len+1);
-		defer (gb_free(a, filepath.text));
-		gb_memmove(filepath.text, path.text, path.len);
-		gb_memmove(filepath.text+path.len, "/", 1);
-		gb_memmove(filepath.text+path.len+1, name.text, name.len);
-		filepath.text[filepath.len] = 0;
+		// Build full path as canonical_dir + "/" + name.
+		// No need to call realpath() again: we already know the canonical
+		// directory, and a file's canonical path is its canonical directory
+		// plus its name (filenames in readdir don't contain symlinks).
+		// NOTE: We deliberately do NOT free `fullpath_text` here because
+		// `info.fullpath` aliases it.
+		isize full_len = canonical_dir.len + 1 + name.len;
+		char *fullpath_text = gb_alloc_array(a, char, full_len+1);
+		gb_memmove(fullpath_text, canonical_dir.text, canonical_dir.len);
+		fullpath_text[canonical_dir.len] = '/';
+		gb_memmove(fullpath_text + canonical_dir.len + 1, name.text, name.len);
+		fullpath_text[full_len] = 0;
 
+		String filepath = make_string(cast(u8 *)fullpath_text, full_len);
 
 		struct stat dir_stat = {};
 
-		if (stat((char *)filepath.text, &dir_stat)) {
+		if (stat(fullpath_text, &dir_stat)) {
 			continue;
 		}
 
@@ -463,7 +475,7 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) 
 
 		FileInfo info = {};
 		info.name = copy_string(a, name);
-		info.fullpath = path_to_full_path(a, filepath);
+		info.fullpath = filepath;
 		info.size = size;
 		info.is_dir = S_ISDIR(dir_stat.st_mode);
 		array_add(fi, info);
