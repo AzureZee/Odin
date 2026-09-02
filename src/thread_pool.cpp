@@ -105,7 +105,20 @@ void thread_pool_queue_push(Thread *thread, WorkerTask task) {
 	thread->pool->tasks_left.fetch_add(1, std::memory_order_release);
 	i32 state = Someone_Waiting;
 	if (thread->pool->tasks_available.compare_exchange_strong(state, Nobody_Waiting)) {
+		// On Linux/BSD: wake ONE sleeping worker instead of broadcasting.
+		// The original `futex_broadcast` made the thread pool a textbook
+		// thundering herd: every push woke all 12 workers, most of which
+		// found nothing and immediately went back to sleep. On WSL each
+		// futex syscall has heavy 9P/virtio overhead, so this turned into
+		// ~10k wasted syscalls per compile. Waking one worker is correct
+		// here because (a) any awake worker can steal from this thread's
+		// queue, and (b) subsequent pushes that find tasks_available ==
+		// Someone_Waiting will wake one more each.
+		#if !defined(GB_SYSTEM_WINDOWS)
+		futex_signal(&thread->pool->tasks_available);
+		#else
 		futex_broadcast(&thread->pool->tasks_available);
+		#endif
 	}
 }
 

@@ -152,20 +152,56 @@ gb_internal String directory_from_path(String const &s) {
 
 
 gb_internal String path_to_full_path(gbAllocator a, String path) {
+	// On Linux/macOS/BSD, glibc's realpath() calls readlink() on every
+	// ancestor path component unconditionally, even when none of them
+	// is a symlink. Cache the result per-thread to avoid the redundant
+	// syscalls. On Windows path_to_full_path uses GetFullPathNameW
+	// (single syscall, no ancestor walk), so this code path is #if'd out.
+	#if defined(GB_SYSTEM_WINDOWS)
 	gbAllocator ha = heap_allocator();
 	char *path_c = gb_alloc_str_len(ha, cast(char *)path.text, path.len);
 	defer (gb_free(ha, path_c));
 
 	char *fullpath = gb_path_get_full_name(a, path_c);
 	String res = string_trim_whitespace(make_string_c(fullpath));
-#if defined(GB_SYSTEM_WINDOWS)
 	for (isize i = 0; i < res.len; i++) {
 		if (res.text[i] == '\\') {
 			res.text[i] = '/';
 		}
 	}
-#endif
 	return copy_string(a, res);
+	#else
+	{
+		static gb_thread_local struct {
+			struct { String key; String value; } entries[512];
+			isize count;
+		} cache = {};
+
+		for (isize i = 0; i < cache.count; i++) {
+			String k = cache.entries[i].key;
+			if (k.len == path.len && gb_memcompare(k.text, path.text, path.len) == 0) {
+				return copy_string(a, cache.entries[i].value);
+			}
+		}
+
+		gbAllocator ha = heap_allocator();
+		char *path_c = gb_alloc_str_len(ha, cast(char *)path.text, path.len);
+		defer (gb_free(ha, path_c));
+
+		char *fullpath = gb_path_get_full_name(a, path_c);
+		String res = string_trim_whitespace(make_string_c(fullpath));
+		String result = copy_string(a, res);
+
+		if (cache.count < gb_count_of(cache.entries)) {
+			gbAllocator ta = heap_allocator();
+			cache.entries[cache.count].key   = copy_string(ta, path);
+			cache.entries[cache.count].value = copy_string(ta, result);
+			cache.count += 1;
+		}
+
+		return result;
+	}
+	#endif
 }
 
 struct Path {
@@ -432,10 +468,7 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) 
 
 	array_init(fi, a, 0, 100);
 
-	// NOTE: Resolve the directory's canonical path ONCE instead of calling
-	// realpath() (which calls readlink() on every ancestor path component)
-	// for every file in the directory. This dramatically reduces syscall
-	// overhead, especially on WSL where each syscall is much more expensive.
+	// Resolve the directory's canonical path ONCE, not once per file.
 	String canonical_dir = path_to_full_path(a, path);
 	defer (gb_free(a, canonical_dir.text));
 
@@ -450,12 +483,6 @@ gb_internal ReadDirectoryError read_directory(String path, Array<FileInfo> *fi) 
 			continue;
 		}
 
-		// Build full path as canonical_dir + "/" + name.
-		// No need to call realpath() again: we already know the canonical
-		// directory, and a file's canonical path is its canonical directory
-		// plus its name (filenames in readdir don't contain symlinks).
-		// NOTE: We deliberately do NOT free `fullpath_text` here because
-		// `info.fullpath` aliases it.
 		isize full_len = canonical_dir.len + 1 + name.len;
 		char *fullpath_text = gb_alloc_array(a, char, full_len+1);
 		gb_memmove(fullpath_text, canonical_dir.text, canonical_dir.len);
