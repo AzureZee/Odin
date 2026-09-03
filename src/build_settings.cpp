@@ -1752,12 +1752,58 @@ gb_internal void init_build_context_error_pos_style() {
 	}
 }
 
+#if defined(GB_SYSTEM_LINUX)
+// WSL detection:
+//   1. /proc/version contains "microsoft" or "WSL"
+//   2. /run/WSL exists as a directory (WSL2-only)
+gb_internal bool is_running_under_wsl(void) {
+	static i32 cached = -1;
+	if (cached != -1) {
+		return cached == 1;
+	}
+
+	bool detected = false;
+
+	int fd = open("/proc/version", O_RDONLY);
+	if (fd >= 0) {
+		char buf[512];
+		isize n = read(fd, buf, sizeof(buf)-1);
+		close(fd);
+		if (n > 0) {
+			buf[n] = 0;
+			if (strstr(buf, "WSL") != nullptr || strstr(buf, "microsoft") != nullptr ) {
+				detected = true;
+			}
+		}
+	}
+
+	if (!detected) {
+		// /run/WSL is a directory on WSL2 only.
+		struct stat st;
+		if (stat("/run/WSL", &st) == 0 && S_ISDIR(st.st_mode)) {
+			detected = true;
+		}
+	}
+
+	cached = detected ? 1 : 0;
+	return detected;
+}
+#else
+gb_internal bool is_running_under_wsl(void) { return false; }
+#endif
+
 gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subtarget) {
 	BuildContext *bc = &build_context;
 
 	gb_affinity_init(&bc->affinity);
 	if (bc->thread_count == 0) {
 		bc->thread_count = gb_max(bc->affinity.thread_count, 1);
+
+		// Cap the default at 4 on WSL, 4 threads perform best on small projects.
+		// And their performance is within an acceptable range even on larger projects.
+		if (is_running_under_wsl() && bc->thread_count > 4) {
+			bc->thread_count = 4;
+		}
 	}
 
 	bc->ODIN_VENDOR  = str_lit("odin");
