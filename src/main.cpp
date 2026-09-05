@@ -362,11 +362,32 @@ gb_internal Array<String> setup_args(int argc, char const **argv, isize *double_
 #endif
 }
 
+// NOTE: `odin completion` reuses the `-help` text to describe the flags it completes, so that the
+// two can never drift apart. While a sink is installed, usage lines are collected rather than printed.
+struct UsageLine {
+	i32    indent;
+	String text;
+};
+gb_global Array<UsageLine> *usage_line_sink = nullptr;
+
 gb_internal void print_usage_line(i32 indent, char const *fmt, ...) {
+	va_list va;
+
+	if (usage_line_sink != nullptr) {
+		char buf[4096] = {};
+		va_start(va, fmt);
+		isize len = gb_snprintf_va(buf, gb_size_of(buf), fmt, va);
+		va_end(va);
+		// NOTE: gb_snprintf_va counts the NUL terminator, unlike snprintf.
+		len = gb_clamp(len-1, 0, gb_size_of(buf)-1);
+		UsageLine line = {indent, copy_string(permanent_allocator(), make_string(cast(u8 *)buf, len))};
+		array_add(usage_line_sink, line);
+		return;
+	}
+
 	while (indent --> 0) {
 		gb_printf("\t");
 	}
-	va_list va;
 	va_start(va, fmt);
 	gb_printf_va(fmt, va);
 	va_end(va);
@@ -394,6 +415,7 @@ gb_internal void usage(String argv0, String argv1 = {}) {
 	print_usage_line(1, "version           Prints version.");
 	print_usage_line(1, "report            Prints information useful to reporting a bug.");
 	print_usage_line(1, "root              Prints the root path where Odin looks for the builtin collections.");
+	print_usage_line(1, "completion        Prints a shell completion script.");
 	print_usage_line(0, "");
 	print_usage_line(0, "For further details on a command, invoke command help:");
 	print_usage_line(1, "e.g. `odin build -help` or `odin help build`");
@@ -662,7 +684,10 @@ gb_internal void did_you_mean_flag(String flag) {
 	gb_printf_err("Unknown flag: '%.*s'\n", LIT(flag));
 }
 
-gb_internal bool parse_build_flags(Array<String> args) {
+// NOTE: The flag table is built separately from the parsing of it, so that `odin completion` can
+// enumerate exactly the flags a command accepts. The help text is not a substitute: it documents
+// fewer flags than exist, and groups them more coarsely than `command_support` does.
+gb_internal Array<BuildFlag> make_build_flags(void) {
 	auto build_flags = array_make<BuildFlag>(heap_allocator(), 0, BuildFlag_COUNT);
 	add_flag(&build_flags, BuildFlag_Help,                    str_lit("help"),                      BuildFlagParam_None,    Command_all);
 	add_flag(&build_flags, BuildFlag_SingleFile,              str_lit("file"),                      BuildFlagParam_None,    Command__does_build | Command__does_check);
@@ -808,6 +833,12 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_AndroidKeystoreAlias,    str_lit("android-keystore-alias"),    BuildFlagParam_String,  Command_bundle_android);
 	add_flag(&build_flags, BuildFlag_AndroidKeystorePassword, str_lit("android-keystore-password"), BuildFlagParam_String,  Command_bundle_android);
 
+	return build_flags;
+}
+
+gb_internal bool parse_build_flags(Array<String> args) {
+	auto build_flags = make_build_flags();
+	defer (array_free(&build_flags));
 
 	Array<String> flag_args = {};
 
@@ -2780,6 +2811,13 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	} else if (command == "root") {
 		print_usage_header_once();
 		print_usage_line(1, "root    Prints the root path where Odin looks for the builtin collections.");
+	} else if (command == "completion") {
+		print_usage_header_once();
+		print_usage_line(1, "completion <shell>   Prints a shell completion script to stdout.");
+		print_usage_line(2, "Supported shells:");
+		print_usage_line(3, "fish");
+		print_usage_line(2, "Example:");
+		print_usage_line(3, "odin completion fish > ~/.config/fish/completions/odin.fish");
 	}
 
 	bool doc             = command == "doc";
@@ -2828,6 +2866,14 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		return true;
 	};
 
+
+	// `-help` is accepted by every command, but is only listed once the command itself has been
+	// recognized, so that an unknown command still falls through to the error at the end.
+	bool const command_recognized = help_resolved || command == "help";
+
+	if (command_recognized && print_flag("-help")) {
+		print_usage_line(2, "Shows this help text.");
+	}
 
 	if (doc) {
 		if (print_flag("-all-packages")) {
@@ -3510,6 +3556,8 @@ gb_internal int print_show_help(String const arg0, String command, String option
 	return 0;
 }
 
+#include "completion.cpp"
+
 gb_internal void print_show_unused(Checker *c) {
 	CheckerInfo *info = &c->info;
 
@@ -4099,6 +4147,16 @@ int main(int arg_count, char const **arg_ptr) {
 		//               Further pull requests to add a newline will be closed without comment.
 		gb_printf("%.*s", LIT(odin_root_dir()));
 		return 0;
+	} else if (command == "completion") {
+		if (args.count > 3) {
+			gb_printf_err("ERROR: `%.*s completion` takes a single shell name.\n", LIT(args[0]));
+			return 1;
+		}
+		String shell = {};
+		if (args.count == 3) {
+			shell = args[2];
+		}
+		return generate_shell_completion(args[0], shell);
 	} else if (command == "clear-cache") {
 		return try_clear_cache() ? 0 : 1;
 	} else {

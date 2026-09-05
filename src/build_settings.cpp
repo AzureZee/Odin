@@ -1792,30 +1792,9 @@ gb_internal bool is_running_under_wsl(void) {
 gb_internal bool is_running_under_wsl(void) { return false; }
 #endif
 
-gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subtarget) {
-	BuildContext *bc = &build_context;
-
-	gb_affinity_init(&bc->affinity);
-	if (bc->thread_count == 0) {
-		bc->thread_count = gb_max(bc->affinity.thread_count, 1);
-
-		// Cap the default at 4 on WSL, 4 threads perform best on small projects.
-		// And their performance is within an acceptable range even on larger projects.
-		if (is_running_under_wsl() && bc->thread_count > 4) {
-			bc->thread_count = 4;
-		}
-	}
-
-	bc->ODIN_VENDOR  = str_lit("odin");
-	bc->ODIN_VERSION = ODIN_VERSION;
-	bc->ODIN_ROOT    = odin_root_dir();
-
-	if (bc->max_error_count <= 0) {
-		bc->max_error_count = DEFAULT_MAX_ERROR_COLLECTOR_COUNT;
-	}
-
-	bc->copy_file_contents = true;
-
+// The target this compiler builds for when none is asked for. Split out of `init_build_context` so
+// that `odin completion`, which runs long before the build context exists, can ask the same question.
+gb_internal TargetMetrics *default_target_metrics(void) {
 	TargetMetrics *metrics = nullptr;
 
 	#if defined(GB_ARCH_64_BIT)
@@ -1869,6 +1848,35 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 			metrics = &target_linux_i386;
 		#endif
 	#endif
+
+	return metrics;
+}
+
+gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subtarget) {
+	BuildContext *bc = &build_context;
+
+	gb_affinity_init(&bc->affinity);
+	if (bc->thread_count == 0) {
+		bc->thread_count = gb_max(bc->affinity.thread_count, 1);
+
+		// Cap the default at 4 on WSL, 4 threads perform best on small projects.
+		// And their performance is within an acceptable range even on larger projects.
+		if (is_running_under_wsl() && bc->thread_count > 4) {
+			bc->thread_count = 4;
+		}
+	}
+
+	bc->ODIN_VENDOR  = str_lit("odin");
+	bc->ODIN_VERSION = ODIN_VERSION;
+	bc->ODIN_ROOT    = odin_root_dir();
+
+	if (bc->max_error_count <= 0) {
+		bc->max_error_count = DEFAULT_MAX_ERROR_COLLECTOR_COUNT;
+	}
+
+	bc->copy_file_contents = true;
+
+	TargetMetrics *metrics = default_target_metrics();
 
 	if (cross_target != nullptr && metrics != cross_target) {
 		bc->different_os = cross_target->os != metrics->os;
