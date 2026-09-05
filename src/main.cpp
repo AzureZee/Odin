@@ -2732,26 +2732,26 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		print_usage_header_once();
 		print_usage_line(1, "build   Compiles directory of .odin files as an executable.");
 		print_usage_line(2, "One must contain the program's entry point, all must be in the same package.");
-		print_usage_line(2, "Use `-file` to build a single file instead.");
+		print_usage_line(2, "Pass a .odin file instead of a directory to build just that file.");
 		print_usage_line(2, "Examples:");
-		print_usage_line(3, "odin build .                     Builds package in current directory.");
-		print_usage_line(3, "odin build <dir>                 Builds package in <dir>.");
-		print_usage_line(3, "odin build filename.odin -file   Builds single-file package, must contain entry point.");
+		print_usage_line(3, "odin build .               Builds package in current directory.");
+		print_usage_line(3, "odin build <dir>           Builds package in <dir>.");
+		print_usage_line(3, "odin build filename.odin   Builds single-file package, must contain entry point.");
 	} else if (command == "run") {
 		print_usage_header_once();
 		print_usage_line(1, "run     Same as 'build', but also then runs the newly compiled executable.");
 		print_usage_line(2, "Append an empty flag and then the args, '-- <args>', to specify args for the output.");
 		print_usage_line(2, "Examples:");
-		print_usage_line(3, "odin run .                     Builds and runs package in current directory.");
-		print_usage_line(3, "odin run <dir>                 Builds and runs package in <dir>.");
-		print_usage_line(3, "odin run filename.odin -file   Builds and runs single-file package, must contain entry point.");
+		print_usage_line(3, "odin run .               Builds and runs package in current directory.");
+		print_usage_line(3, "odin run <dir>           Builds and runs package in <dir>.");
+		print_usage_line(3, "odin run filename.odin   Builds and runs single-file package, must contain entry point.");
 	} else if (command == "check") {
 		print_usage_header_once();
 		print_usage_line(1, "check   Parses and type checks directory of .odin files.");
 		print_usage_line(2, "Examples:");
-		print_usage_line(3, "odin check .                     Type checks package in current directory.");
-		print_usage_line(3, "odin check <dir>                 Type checks package in <dir>.");
-		print_usage_line(3, "odin check filename.odin -file   Type checks single-file package, must contain entry point.");
+		print_usage_line(3, "odin check .               Type checks package in current directory.");
+		print_usage_line(3, "odin check <dir>           Type checks package in <dir>.");
+		print_usage_line(3, "odin check filename.odin   Type checks single-file package, must contain entry point.");
 	} else if (command == "test") {
 		print_usage_header_once();
 		print_usage_line(1, "test    Builds and runs procedures with the attribute @(test) in the initial package.");
@@ -2759,9 +2759,9 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		print_usage_header_once();
 		print_usage_line(1, "doc     Generates documentation from a directory of .odin files.");
 		print_usage_line(2, "Examples:");
-		print_usage_line(3, "odin doc .                     Generates documentation on package in current directory.");
-		print_usage_line(3, "odin doc <dir>                 Generates documentation on package in <dir>.");
-		print_usage_line(3, "odin doc filename.odin -file   Generates documentation on single-file package.");
+		print_usage_line(3, "odin doc .               Generates documentation on package in current directory.");
+		print_usage_line(3, "odin doc <dir>           Generates documentation on package in <dir>.");
+		print_usage_line(3, "odin doc filename.odin   Generates documentation on single-file package.");
 	} else if (command == "version") {
 		print_usage_header_once();
 		print_usage_line(1, "version   Prints version.");
@@ -3009,6 +3009,8 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-file")) {
 			print_usage_line(2, "Tells `%.*s %.*s` to treat the given file as a self-contained package.", LIT(arg0), LIT(command));
 			print_usage_line(2, "This means that `<dir>/a.odin` won't have access to `<dir>/b.odin`'s contents.");
+			print_usage_line(2, "A .odin file is treated this way by default, so the flag is only needed to stop");
+			print_usage_line(2, "the argument from being resolved as a `collection:path` reference.");
 		}
 
 		if (print_flag("-foreign-error-procedures")) {
@@ -4130,7 +4132,9 @@ int main(int arg_count, char const **arg_ptr) {
 	if (init_filename.len > 0 && !build_context.show_help) {
 		// The command must be build, run, test, check, or another that takes a directory or filename.
 		if (!path_is_directory(init_filename)) {
-			// Input package is a filename. We allow this only if `-file` was given, otherwise we exit with an error message.
+			// Input package is a filename, so it is treated as a self-contained, single-file package.
+			// `-file` used to be required to opt into this; it is still accepted, where it additionally
+			// suppresses resolving the argument as a `collection:path` reference.
 			bool single_file_package = false;
 			for_array(i, args) {
 				if (i >= 3 && i <= last_non_run_arg && args[i] == "-file") {
@@ -4180,24 +4184,19 @@ int main(int arg_count, char const **arg_ptr) {
 
 			}
 
-			if (!single_file_package) {
-				gb_printf_err("ERROR: `%.*s %.*s` takes a package/directory as its first argument.\n", LIT(args[0]), LIT(command));
-				if (init_filename == "-file") {
-					gb_printf_err("Did you mean `%.*s %.*s <filename.odin> -file`?\n", LIT(args[0]), LIT(command));
-				} else {
-					if (!gb_file_exists(cast(const char*)init_filename.text)) {
-						gb_printf_err("The file '%.*s' was not found.\n", LIT(init_filename));
-						return 1;
-					}
-					gb_printf_err("Did you mean `%.*s %.*s %.*s -file`?\n", LIT(args[0]), LIT(command), LIT(init_filename));
-				}
-
-				gb_printf_err("The `-file` flag tells it to treat a file as a self-contained package.\n");
+			if (init_filename == "-file") {
+				// NOTE: `-file` is a no-op left over from when single-file packages had to be opted into.
+				// Reaching here means it was given without a filename to go with it.
+				gb_printf_err("ERROR: `%.*s %.*s` takes a package/directory or a .odin file as its first argument.\n", LIT(args[0]), LIT(command));
+				gb_printf_err("Did you mean `%.*s %.*s <filename.odin>`?\n", LIT(args[0]), LIT(command));
 				return 1;
-			} else {
+			}
+
+			// NOTE: Scoped so that the `goto` above does not jump over these initializations.
+			{
 				String const ext = str_lit(".odin");
 				if (!string_ends_with(init_filename, ext)) {
-					gb_printf_err("Expected either a directory or a .odin file, got '%.*s'\n", LIT(init_filename));
+					gb_printf_err("ERROR: `%.*s %.*s` takes a package/directory or a .odin file as its first argument, got '%.*s'\n", LIT(args[0]), LIT(command), LIT(init_filename));
 					return 1;
 				}
 				if (!gb_file_exists(cast(const char*)init_filename.text)) {
