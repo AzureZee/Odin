@@ -192,7 +192,7 @@ elif [ $# -eq 1 ]; then
 		;;
 	debug)
 		build_odin debug
-		run_demo
+		# run_demo
 		;;
 	*)
 		build_odin $1
