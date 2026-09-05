@@ -679,6 +679,7 @@ gb_internal bool parse_build_flags(Array<String> args) {
 	add_flag(&build_flags, BuildFlag_ShowUnusedWithLocation,  str_lit("show-unused-with-location"), BuildFlagParam_None,    Command_check);
 	add_flag(&build_flags, BuildFlag_ShowSystemCalls,         str_lit("show-system-calls"),         BuildFlagParam_None,    Command_all);
 	add_flag(&build_flags, BuildFlag_ThreadCount,             str_lit("thread-count"),              BuildFlagParam_Integer, Command_all);
+	add_flag(&build_flags, BuildFlag_ThreadCount,             str_lit("j"),                         BuildFlagParam_Integer, Command_all);
 	add_flag(&build_flags, BuildFlag_KeepTempFiles,           str_lit("keep-temp-files"),           BuildFlagParam_None,    Command__does_build | Command_strip_semicolon);
 	add_flag(&build_flags, BuildFlag_Collection,              str_lit("collection"),                BuildFlagParam_String,  Command__does_check);
 	add_flag(&build_flags, BuildFlag_Define,                  str_lit("define"),                    BuildFlagParam_String,  Command__does_check, true);
@@ -845,6 +846,22 @@ gb_internal bool parse_build_flags(Array<String> args) {
 		name = substring(name, 0, end);
 		String param = {};
 		if (end < flag.len-1) param = substring(flag, 2+end, flag.len);
+
+		// NOTE: `-jN` is accepted as a shorthand for `-thread-count:N`, mirroring `make -jN`.
+		// The parameter is attached directly to the flag, so split it back apart here.
+		if (param.len == 0 && name.len > 1 && name[0] == 'j') {
+			bool all_digits = true;
+			for (isize i = 1; i < name.len; i++) {
+				if (!gb_char_is_digit(cast(char)name[i])) {
+					all_digits = false;
+					break;
+				}
+			}
+			if (all_digits) {
+				param = substring(name, 1, name.len);
+				name = substring(name, 0, 1);
+			}
+		}
 
 		bool is_supported = true;
 		bool found = false;
@@ -3357,6 +3374,12 @@ gb_internal int print_show_help(String const arg0, String command, String option
 		if (print_flag("-thread-count:<integer>")) {
 			print_usage_line(2, "Overrides the number of threads the compiler will use to compile with.");
 			print_usage_line(2, "Example: -thread-count:2");
+		}
+
+		if (print_flag("-j:<integer>")) {
+			print_usage_line(2, "Shorthand for -thread-count:<integer>.");
+			print_usage_line(2, "The value may be attached directly, as in `make`.");
+			print_usage_line(2, "Example: -j2");
 		}
 	}
 
