@@ -112,28 +112,28 @@ Darwin)
 		echo "Warning: MacOSX.sdk not found."
 	fi
 
-	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags) ${darwin_sysroot}"
-	LDFLAGS="$LDFLAGS -liconv -ldl -framework System -lLLVM"
+	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags) ${darwin_sysroot}"
+	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --ldflags) -liconv -ldl -framework System -lLLVM"
 	;;
 FreeBSD)
-	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ $($LLVM_CONFIG --libs core native --system-libs)"
+	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags)"
+	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --ldflags) -lstdc++ $($LLVM_CONFIG --libs core native --system-libs)"
 	;;
 NetBSD)
-	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ $($LLVM_CONFIG --libs core native --system-libs)"
+	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags)"
+	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --ldflags) -lstdc++ $($LLVM_CONFIG --libs core native --system-libs)"
 	;;
 Linux)
-	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ -ldl $($LLVM_CONFIG --libs core native passes arm aarch64 x86 webassembly riscv --system-libs --libfiles)"
+	CXXFLAGS="$CXXFLAGS $($LLVM_CONFIG --cxxflags)"
+	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --ldflags) -lstdc++ -ldl $($LLVM_CONFIG --libs core native passes arm aarch64 x86 webassembly riscv --system-libs --libfiles)"
 	# Copy libLLVM*.so into current directory for linking
 	# NOTE: This is needed by the Linux release pipeline!
 	# cp $(readlink -f $($LLVM_CONFIG --libfiles)) ./
 	LDFLAGS="$LDFLAGS -Wl,-rpath=\$ORIGIN"
 	;;
 OpenBSD)
-	CXXFLAGS="$CXXFLAGS -I/usr/local/include $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ -L/usr/local/lib -Wl,-rpath,$($LLVM_CONFIG --libdir) -liconv"
+	CXXFLAGS="$CXXFLAGS -I/usr/local/include $($LLVM_CONFIG --cxxflags)"
+	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --ldflags) -lstdc++ -L/usr/local/lib -Wl,-rpath,$($LLVM_CONFIG --libdir) -liconv"
 	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --libs core native --system-libs)"
 	;;
 *)
@@ -141,63 +141,27 @@ OpenBSD)
 	;;
 esac
 
-build_odin() {
-	case $1 in
-	debug)
-		EXTRAFLAGS="-g"
-		;;
-	release)
-		EXTRAFLAGS="-O3"
-		;;
-	release-native)
-		if [ "$OS_ARCH" = "arm64" ] || [ "$OS_ARCH" = "aarch64" ]; then
-			# Use preferred flag for Arm (ie arm64 / aarch64 / etc)
-			EXTRAFLAGS="-O3 -mcpu=native"
-		else
-			# Use preferred flag for x86 / amd64
-			EXTRAFLAGS="-O3 -march=native"
-		fi
-		;;
-	nightly)
-		EXTRAFLAGS="-DNIGHTLY -O3"
-		;;
-	*)
-		error "Build mode \"$1\" unsupported!"
-		;;
-	esac
-
-	set -x
-	$CXX src/main.cpp src/libtommath.cpp $DISABLED_WARNINGS $CPPFLAGS $CXXFLAGS $EXTRAFLAGS $LDFLAGS -o odin
-	set +x
-}
-
-run_demo() {
-	./odin run examples/demo -vet -strict-style -- Hellope World
-}
-
-if [ $# -eq 0 ]; then
-	build_odin debug
-	run_demo
-
-	: ${PROGRAM:=$0}
-	printf "\nDebug compiler built. Note: run \"$PROGRAM release\" or \"$PROGRAM release-native\" if you want a faster, release mode compiler.\n"
-elif [ $# -eq 1 ]; then
-	case $1 in
-	report)
-		if [ ! -f "./odin" ]; then
-			build_odin debug
-			run_demo
-		fi
-		./odin report
-		;;
-	debug)
-		build_odin debug
-		# run_demo
-		;;
-	*)
-		build_odin $1
-		;;
-	esac
-else
-	error "Too many arguments!"
+HAVE_MOLD=0
+if command -v mold >/dev/null 2>&1; then
+	HAVE_MOLD=1
 fi
+
+# 输出 Make 可 include 的变量。注意：
+# - llvm-config --ldflags 会多行输出，要把换行折叠成空格，否则 Make 解析失败
+# - shell 里的 $ORIGIN 在 Make 里要写成 $$ORIGIN（Make 变量展开规则）
+# - Make 会把 " 视为引号字符并剥掉，所以 CPPFLAGS 里的 " 要写成 \"，
+#   这样 Make 展开后才保留字面 "，clang 才能正确接收为字符串字面量。
+# 每行 VAR = value 形式，Make 的 include 会直接消费。
+CPPFLAGS_ESC=$(printf '%s' "$CPPFLAGS" | sed 's/"/\\"/g' | tr '\n' ' ')
+CXXFLAGS_BASE_VAL="$(printf '%s' "$CXXFLAGS" | tr '\n' ' ')"
+LDFLAGS_BASE_VAL="$(printf '%s' "$LDFLAGS" | sed 's/\$ORIGIN/\$\$ORIGIN/g' | tr '\n' ' ')"
+
+printf '%s\n' \
+	"CXX = ${CXX}" \
+	"CPPFLAGS = ${CPPFLAGS_ESC}" \
+	"CXXFLAGS_BASE = ${CXXFLAGS_BASE_VAL}" \
+	"LDFLAGS_BASE = ${LDFLAGS_BASE_VAL}" \
+	"DISABLED_WARNINGS = ${DISABLED_WARNINGS}" \
+	"LLVM_CONFIG = ${LLVM_CONFIG}" \
+	"LLVM_BINDIR = $($LLVM_CONFIG --bindir)" \
+	"USE_MOLD = ${HAVE_MOLD}"
